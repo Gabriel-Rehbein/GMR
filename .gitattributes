@@ -1,2 +1,58 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+import json
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, pipeline
+import sqlite3
+from flask import Flask, request, jsonify
+
+# Coleta e Preparação de Dados
+with open('coding_problems.json', 'r') as file:
+    data = json.load(file)
+
+problems = [item['problem'] for item in data]
+solutions = [item['solution'] for item in data]
+
+# Construção e Treinamento do Modelo
+model_name = "microsoft/CodeGPT-small-py"
+tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+model = GPT2LMHeadModel.from_pretrained(model_name)
+code_generator = pipeline('text-generation', model=model, tokenizer=tokenizer)
+
+# Banco de Dados
+conn = sqlite3.connect('gmr_database.db')
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS solutions
+              (id INTEGER PRIMARY KEY AUTOINCREMENT, problem TEXT, solution TEXT, feedback TEXT)''')
+conn.commit()
+
+# Pipeline de Solução
+def solve_code_problem(problem_description):
+    input_ids = tokenizer.encode(problem_description, return_tensors='pt')
+    outputs = model.generate(input_ids, max_length=200, num_return_sequences=1)
+    solution = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    cursor.execute("INSERT INTO solutions (problem, solution) VALUES (?, ?)", (problem_description, solution))
+    conn.commit()
+    
+    return solution
+
+# API RESTful
+app = Flask(__name__)
+
+@app.route('/solve', methods=['POST'])
+def solve():
+    problem_description = request.json.get('problem_description')
+    solution = solve_code_problem(problem_description)
+    return jsonify({'solution': solution})
+
+@app.route('/feedback', methods=['POST'])
+def feedback():
+    problem_id = request.json.get('problem_id')
+    feedback_text = request.json.get('feedback')
+    cursor.execute("UPDATE solutions SET feedback = ? WHERE id = ?", (feedback_text, problem_id))
+    conn.commit()
+    return jsonify({'status': 'success'})
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+# Fechar conexão com banco de dados ao terminar
+conn.close()
